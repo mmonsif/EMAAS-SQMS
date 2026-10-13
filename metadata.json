@@ -1,0 +1,6 @@
+{
+  "name": "Marsa Alam Ground Handling SQMS",
+  "description": "Safety & Quality Management System for Ground Handling at Marsa Alam International Airport (RMF). Bi-directional English/Arabic, instant 30-second hazard reporting, ISAGO/IGOM audits, CAPA, SPI/SPT, Safety Bulletins, and Management of Change.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
