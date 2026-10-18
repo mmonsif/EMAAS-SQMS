@@ -1,0 +1,16 @@
+{
+  "name": "EMAAS SQMS - Ground Handling Safety & Quality",
+  "short_name": "EMAAS SQMS",
+  "description": "EMAAS Safety & Quality Management System for Marsa Alam International Airport Ground Handling Operations",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}

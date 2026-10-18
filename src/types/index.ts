@@ -7,9 +7,9 @@ export type StationRole =
   | 'sdm'            // Service Delivery Manager
   | 'hod_ops'        // Head of Operations (Ramp, Load, Pax)
   | 'hod_maint'      // Head of Maintenance (GSE)
-  | 'hod_safety'     // Safety & Quality Manager
+  | 'hod_safety'     // Safety & Quality Manager (SQM)
   | 'hod_training'   // Head of Training
-  | 'safety_officer' // Safety Officer / Investigator
+  | 'safety_officer' // Safety Officer / Investigator / S&Q Member
   | 'ramp_supervisor'// Ramp Shift Supervisor
   | 'field_staff';   // Frontline Ramp/Gate Agent
 
@@ -19,15 +19,29 @@ export type ReportCategory =
   | 'gse_damage' 
   | 'personal_injury' 
   | 'fod' 
-  | 'delay';
+  | 'delay'
+  | 'wildlife'
+  | 'spill';
 
+// Strict 10-State Machine for Safety Reports & Findings
 export type ReportLifecycleStatus = 
-  | 'submitted' 
-  | 'acknowledged' 
-  | 'investigating' 
-  | 'capa_pending' 
-  | 'capa_implemented' 
-  | 'closed';
+  | 'submitted'              // 1. Frontline or Airline report submitted
+  | 'acknowledged'           // 2. Safety Officer / S&Q acknowledged
+  | 'level_assigned'         // 3. SQM assigned Level (Major 30d / Minor 60d / Obs 90d) & targetClosureDate set
+  | 'under_investigation'    // 4. S&Q investigates: lists procedures, mitigations, initial risk index
+  | 'plan_pending'           // 4b. S&Q assigns HoD and sets capaPlanDueDate
+  | 'plan_under_review'      // 5. Assigned HoD submitted CAPA plan (RCA + Corrective + Preventive)
+  | 'plan_returned'          // 6a. SQM returned plan for revision with comments
+  | 'plan_approved'          // 6b. SQM approved the CAPA plan
+  | 'effectiveness_pending'  // 7a. S&Q to record effectiveness
+  | 'pending_signoff'        // 7b. S&Q recorded effectiveness & residual risk; awaiting SQM final sign-off
+  | 'closed';                // 8. SQM final sign-off approved & digitally signed
+
+// Investigation Level & Mandated Closure Timeline
+export type InvestigationLevel = 'level_1' | 'level_2' | 'level_3';
+// Level 1: Major – must be closed within 30 days
+// Level 2: Minor – must be closed within 60 days
+// Level 3: Observation – must be closed within 90 days
 
 export type RiskLevel = 'Low' | 'Medium' | 'High' | 'Critical';
 
@@ -51,13 +65,69 @@ export interface CAPAItem {
   assignedDepartment: string;
   assignedManager: string;
   targetDate: string;
-  implementedDate?: string;
-  status: 'pending' | 'implemented' | 'verified';
+  submittedAt?: string;
+  status: 'pending' | 'submitted' | 'returned' | 'approved' | 'implemented' | 'verified';
+}
+
+export interface AuditTrailEntry {
+  id: string;
+  timestamp: string;
+  actorName: string;
+  actorRole: StationRole | string;
+  action: string;
+  details?: string;
+  previousStatus?: ReportLifecycleStatus | string;
+  newStatus?: ReportLifecycleStatus | string;
+  comments?: string;
+}
+
+export interface FileAttachment {
+  id: string;
+  fileName: string;
+  fileSize: string;
+  fileType: string;
+  uploadedBy: string;
+  uploadedRole: string;
+  uploadedAt: string;
+  category: 'initial_report' | 'investigation' | 'capa_plan' | 'effectiveness';
+  url?: string;
+}
+
+export interface SQMSNotification {
+  id: string;
+  timestamp: string;
+  title: string;
+  titleAr: string;
+  message: string;
+  messageAr: string;
+  targetRoles: (StationRole | string)[];
+  targetUserId?: string;
+  sourceReportId?: string;
+  sourceFindingId?: string;
+  priority: 'normal' | 'urgent' | 'critical';
+  isRead: boolean;
+  category: 
+    | 'new_report' 
+    | 'acknowledged' 
+    | 'level_assigned' 
+    | 'plan_assignment' 
+    | 'plan_submitted' 
+    | 'plan_returned' 
+    | 'plan_approved' 
+    | 'effectiveness_recorded' 
+    | 'signoff_ready' 
+    | 'closed' 
+    | 'overdue_alert';
+  emailSent?: boolean;
+  emailRecipient?: string;
 }
 
 export interface SafetyReport {
   id: string; // RMF-SMS-2026-XXXX
   timestamp: string;
+  reportSource: 'frontline_agent' | 'airline_report';
+  airlineName?: string;
+  airlineRefNumber?: string;
   reporterType: 'anonymous' | 'identified';
   reporterName?: string;
   reporterBadge?: string;
@@ -71,20 +141,65 @@ export interface SafetyReport {
   flightNumber?: string;
   gseIdLinked?: string;
   lifecycleStatus: ReportLifecycleStatus;
+  
+  // Step 2: Acknowledgment
   acknowledgedBy?: string;
   acknowledgedAt?: string;
+  
+  // Step 3: Level Classification (SQM Only)
+  level?: InvestigationLevel;
+  levelAssignedBy?: string;
+  levelAssignedAt?: string;
+  targetClosureDate?: string; // Automatically calculated based on dateLevelAssigned + 30/60/90 days
+  
+  // Step 4: Investigation (S&Q)
   safetyOfficerAssigned?: string;
   investigationSummary?: string;
+  existingProcedures?: string[];
+  currentMitigations?: string;
   preMitigationRisk?: RiskAssessment;
+  assignedHoD?: string;
+  assignedHoDRole?: StationRole;
+  capaPlanDueDate?: string;
+
+  // Step 5: CAPA Plan (Assigned HoD)
   rcaType?: 'simple' | 'five_whys';
   simpleRca?: SimpleRCA;
   fiveWhysRca?: string[];
   capa?: CAPAItem;
-  postMitigationRisk?: RiskAssessment;
-  issuedBulletinId?: string;
+
+  // Step 6: Plan Review (SQM)
+  sqmPlanReviewDecision?: 'approve' | 'return';
+  sqmPlanReviewComments?: string;
+  sqmPlanReviewedAt?: string;
+  sqmPlanReviewedBy?: string;
+
+  // Step 7: Effectiveness & Residual Risk (S&Q)
+  effectivenessEvaluation?: {
+    evaluatedBy: string;
+    evaluatedAt: string;
+    isEffective: boolean;
+    evaluationNotes: string;
+    evidenceSummary?: string;
+  };
+  residualRisk?: RiskAssessment;
+  postMitigationRisk?: RiskAssessment; // alias for residual risk
+
+  // Step 8: Final Sign-off & Closure (SQM)
+  finalSignoff?: {
+    signedBy: string;
+    signedAt: string;
+    comments?: string;
+    signatureHash: string;
+  };
   closedBy?: string;
   closedAt?: string;
   closureNotes?: string;
+
+  // Linked Bulletins & History
+  issuedBulletinId?: string;
+  auditTrail: AuditTrailEntry[];
+  attachments: FileAttachment[];
 }
 
 export type AuditType = 'internal' | 'external';
@@ -100,33 +215,80 @@ export type AuditLifecycleStage =
 
 export interface AuditFinding {
   id: string; // RMF-AUD-2026-XXXX
-  auditType: AuditType;
+  auditId?: string; // Links to AuditScheduleItem.id (e.g. AUD-SCH-2026-01)
   auditTitle: string;
+  auditType: AuditType;
   externalAuditorOrg?: string; // e.g. "IATA ISAGO", "ECAA", "EgyptAir", "TUI Fly"
   isagoDiscipline: AuditDiscipline;
-  standardReference: string; // e.g. "ISAGO RMP 2.3.1"
-  severityLevel: AuditSeverity;
+  standardReference: string; // e.g. "ISAGO RMP 2.3.1", "IGOM 4.1.2", "ICAO Annex 19 App 2"
+  severityLevel?: AuditSeverity;
+  title?: string;
   description: string;
+  department: string;
   assignedDepartment: string;
-  assignedHoD: string;
+  location?: string;
   raisedDate: string;
-  deadlineDate: string;
-  lifecycleStage: AuditLifecycleStage;
+  deadlineDate?: string;
+
+  // Unified Strict 10-State Machine Lifecycle (identical to SafetyReport)
+  lifecycleStatus: ReportLifecycleStatus;
+  lifecycleStage?: AuditLifecycleStage; // Backwards-compatible legacy alias
+
+  // Step 2: Acknowledgment
+  acknowledgedBy?: string;
   acknowledgedAt?: string;
+
+  // Step 3: Level Classification (SQM Only)
+  level?: InvestigationLevel;
+  levelAssignedBy?: string;
+  levelAssignedAt?: string;
+  targetClosureDate?: string; // Automatically calculated based on dateLevelAssigned + 30/60/90 days
+  levelComments?: string;
+
+  // Step 4: Investigation (S&Q)
+  safetyOfficerAssigned?: string;
+  investigationSummary?: string;
+  existingProcedures?: string[];
+  currentMitigations?: string;
+  preMitigationRisk?: RiskAssessment;
+  assignedHoD?: string;
+  assignedHoDRole?: StationRole;
+  capaPlanDueDate?: string;
+
+  // Step 5: CAPA Plan (Assigned HoD)
+  rcaType?: 'simple' | 'five_whys';
   rcaMethod?: 'simple' | 'five_whys';
   simpleRca?: SimpleRCA;
   fiveWhysRca?: string[];
+  capa?: CAPAItem;
   capaProposal?: {
     correctiveAction: string;
     preventiveAction: string;
     targetDate: string;
     proposedAt: string;
   };
+
+  // Step 6: Plan Review (SQM)
+  sqmPlanReviewDecision?: 'approve' | 'return';
+  sqmPlanReviewComments?: string;
+  sqmPlanReviewedAt?: string;
+  sqmPlanReviewedBy?: string;
   sqmApproval?: {
     approvedBy: string;
     approvedAt: string;
     comments: string;
   };
+
+  // Step 7: Effectiveness & Residual Risk (S&Q)
+  effectivenessEvaluation?: {
+    evaluatedBy: string;
+    evaluatedAt: string;
+    isEffective: boolean;
+    evaluationNotes: string;
+    evidenceSummary?: string;
+  };
+  residualRisk?: RiskAssessment;
+  postMitigationRisk?: RiskAssessment;
   implementationEvidence?: {
     evidenceNotes: string;
     documentRef: string;
@@ -138,24 +300,84 @@ export interface AuditFinding {
     isEffective: boolean;
     verificationNotes: string;
   };
+
+  // Step 8: Final Sign-off & Closure (SQM)
+  finalSignoff?: {
+    signedBy: string;
+    signedAt: string;
+    comments?: string;
+    signatureHash: string;
+  };
+  closedBy?: string;
+  closedAt?: string;
+  closureNotes?: string;
+
+  // Linked Bulletins, Audit Trail & Attachments
   issuedNoticeId?: string;
+  auditTrail: AuditTrailEntry[];
+  attachments: FileAttachment[];
 }
 
 export interface AuditScheduleItem {
-  id: string;
+  id: string; // AUD-SCH-2026-XX
   title: string;
+  titleAr?: string;
   auditType: AuditType;
   auditorOrganization: string;
   leadAuditor: string;
+  auditTeam?: string[];
   discipline: AuditDiscipline;
-  scheduledDate: string;
+  department?: string;
+  location?: string;
+  scheduledDate: string; // YYYY-MM-DD
+  endDate?: string;      // YYYY-MM-DD
   quarter: 'Q1' | 'Q2' | 'Q3' | 'Q4';
-  status: 'planned' | 'in_progress' | 'completed' | 'overdue';
+  status: 'planned' | 'in_progress' | 'completed' | 'overdue' | 'closed';
   findingsCount: number;
   scopeSummary: string;
+  executiveSummary?: string;
+  checklistCriteria?: string[];
+  attachments?: FileAttachment[];
+  templateId?: string;
+  checklistItems?: AuditChecklistItem[];
+}
+
+export interface AuditChecklistItem {
+  id: string; // CHK-01
+  code: string; // e.g. "ISAGO RMP 2.3.1", "IGOM 4.1.2"
+  title: string;
+  question: string;
+  category: string; // e.g. "Aircraft Marshalling", "GSE Safety", "FOD Prevention", "Load Control"
+  guidanceNotes?: string;
+  mandatory: boolean;
+}
+
+export interface AuditTemplate {
+  id: string; // TPL-ISAGO-RMP-01
+  title: string;
+  titleAr?: string;
+  auditType: AuditType; // 'internal' | 'external'
+  discipline: AuditDiscipline; // 'ORM' | 'RMP' | 'PAX' | 'LOD' | 'BAG'
+  standardFramework: string; // e.g. "IATA ISAGO 14th Ed", "IATA IGOM 2026", "ICAO Doc 9859", "ECAR 139"
+  scopeSummary: string;
+  department: string;
+  leadAuditorRole?: string;
+  estimatedHours: number;
+  items: AuditChecklistItem[];
+  createdAt: string;
+  updatedAt?: string;
+  isDefault?: boolean;
 }
 
 export type GSETagStatus = 'green' | 'amber' | 'red'; // Fit for Service, Maintenance Due, Grounded
+
+export interface GSETagLogEntry {
+  id: string;
+  timestamp: string;
+  tag: GSETagStatus;
+  notes: string;
+  changedBy: string;
+}
 
 export interface GSEVehicle {
   id: string; // RMF-TUG-01, RMF-BL-04
@@ -169,6 +391,10 @@ export interface GSEVehicle {
   nextServiceDue: string;
   activeDefectNotes?: string;
   activeDefectReportId?: string;
+  serviceClearanceNotes?: string;
+  clearedBy?: string;
+  clearedAt?: string;
+  tagHistory?: GSETagLogEntry[];
 }
 
 export interface StaffCourse {
@@ -188,21 +414,44 @@ export interface StaffTrainingRecord {
   courses: StaffCourse[];
 }
 
+export type SPIType = 'lagging' | 'leading';
+export type SPIDirection = 'lower_is_better' | 'higher_is_better';
+
+export interface SPIReadingRecord {
+  date: string;
+  value: number;
+  period?: string;
+  turnsCount?: number;
+  notes?: string;
+}
+
 export interface SPIItem {
   id: string;
-  code: string; // SPI-01
+  code: string; // e.g. SPI-01
+  type: SPIType; // lagging (actual outcomes) vs leading (preventive)
+  category: string; // Ramp Damage, GSE Safety, OHS, Loading & Weight, Reporting Culture, etc.
   name: string;
   nameAr: string;
   description: string;
   unit: string;
+  measurementFormula?: string;
+  applicableFramework: string; // e.g. "ICAO Annex 19 Amdt 2 (Nov 2026) / ECAA / ISAGO"
+  ownerDepartment: string;
   baseline: number;
-  targetSPT: number;
-  alertThreshold: number;
+  baselinePeriod?: string; // e.g. "2026 Baseline"
+  targetSPT: number; // Safety Performance Target value
+  sptDescription: string; // Target narrative description
+  sptDescriptionAr?: string;
+  sptDeadline?: string; // e.g. "December 2027"
+  alertThreshold: number; // Warning / trigger limit
+  targetDirection: SPIDirection; // lower_is_better vs higher_is_better
   currentValue: number;
   trend: 'improving' | 'stable' | 'deteriorating';
-  frequency: 'Monthly' | 'Quarterly';
+  frequency: 'Monthly' | 'Quarterly' | 'Annual';
   status: 'nominal' | 'warning' | 'alert';
   lastUpdated: string;
+  reportingCaution?: string; // Special guidance e.g. "Do not set zero occurrences as sole measure"
+  historicalReadings?: SPIReadingRecord[];
 }
 
 export interface BulletinAcknowledgment {
@@ -342,6 +591,7 @@ export interface RolePermissions {
   canViewIncidentLogs: boolean;
   canViewAudits: boolean;
   canViewSPI: boolean;
+  canViewKPIDashboard?: boolean;
   canViewBulletins: boolean;
   canViewMoC: boolean;
   canViewGSE: boolean;
@@ -359,6 +609,14 @@ export interface RolePermissions {
   issueBulletins: boolean;
   approveMoC: boolean;
   adminConfig: boolean;
+}
+
+export interface RoleDefinition {
+  key: string;
+  label: string;
+  labelAr?: string;
+  clearance: string;
+  isSystem?: boolean;
 }
 
 export interface ManagementReviewSelections {

@@ -1,7 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext.tsx';
 import { translations } from '../i18n/translations.ts';
 import { ReportCategory, RiskLevel } from '../types/index.ts';
+import { 
+  saveOfflineReport, 
+  getOfflineReports, 
+  removeOfflineReport, 
+  syncOfflineReports, 
+  QueuedOfflineReport 
+} from '../utils/offlineReportStorage.ts';
 import { 
   ShieldAlert, 
   Camera, 
@@ -18,7 +25,14 @@ import {
   Sliders,
   Settings,
   AlertTriangle,
-  ShieldCheck
+  ShieldCheck,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  Database,
+  Inbox,
+  Trash2,
+  ExternalLink
 } from 'lucide-react';
 
 export const QuickSafetyReport: React.FC = () => {
@@ -72,9 +86,89 @@ export const QuickSafetyReport: React.FC = () => {
   const [severity, setSeverity] = useState<number>(3); // 1 to 5
   const [likelihood, setLikelihood] = useState<string>('C'); // A to E
 
+  // Offline & Service Worker Sync State
+  const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [simulateOffline, setSimulateOffline] = useState(false);
+  const [queuedReports, setQueuedReports] = useState<QueuedOfflineReport[]>([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [showOfflineQueueModal, setShowOfflineQueueModal] = useState(false);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submissionReceipt, setSubmissionReceipt] = useState<{ id: string; timestamp: string } | null>(null);
+  const [submissionReceipt, setSubmissionReceipt] = useState<{ id: string; timestamp: string; isOffline?: boolean } | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
+
+  const effectiveOnline = isOnline && !simulateOffline;
+
+  // Load initial queued reports
+  const refreshOfflineQueue = useCallback(async () => {
+    try {
+      const reports = await getOfflineReports();
+      setQueuedReports(reports);
+    } catch (err) {
+      console.error('[SW Offline] Failed to load queue:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshOfflineQueue();
+  }, [refreshOfflineQueue]);
+
+  // Background Sync trigger callback
+  const triggerAutoSync = useCallback(async () => {
+    setIsSyncing(true);
+    try {
+      const res = await syncOfflineReports((data) => {
+        return addSafetyReport(data);
+      });
+      await refreshOfflineQueue();
+      if (res.syncedCount > 0) {
+        setSyncFeedback(
+          language === 'ar'
+            ? `تمت استعادة الاتصال: تمت مزامنة عدد ${res.syncedCount} بلاغ مسجل في وضع عدم الاتصال إلى قاعدة بيانات السلامة المركزية!`
+            : `Connection Restored: Successfully synced ${res.syncedCount} offline report(s) to Central Safety SQMS!`
+        );
+        setTimeout(() => setSyncFeedback(null), 6000);
+      }
+    } catch (err) {
+      console.error('[SW Offline] Sync failed:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [addSafetyReport, language, refreshOfflineQueue]);
+
+  // Online / Offline and SW Message Listeners
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (!simulateOffline) {
+        triggerAutoSync();
+      }
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Listen to service worker trigger message
+    const handleSwMessage = (e: MessageEvent) => {
+      if (e.data && e.data.type === 'TRIGGER_OFFLINE_SYNC') {
+        if (navigator.onLine && !simulateOffline) {
+          triggerAutoSync();
+        }
+      }
+    };
+    navigator.serviceWorker?.addEventListener('message', handleSwMessage);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      navigator.serviceWorker?.removeEventListener('message', handleSwMessage);
+    };
+  }, [simulateOffline, triggerAutoSync]);
 
   // Pre-calculated ICAO Risk Index Matrix
   const calculateRiskIndex = (sev: number, like: string): { score: string; level: RiskLevel; color: string } => {
@@ -97,7 +191,7 @@ export const QuickSafetyReport: React.FC = () => {
 
   const currentRisk = calculateRiskIndex(severity, likelihood);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError(null);
 
@@ -161,31 +255,58 @@ export const QuickSafetyReport: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    setTimeout(() => {
-      const newReport = addSafetyReport({
-        reporterType,
-        reporterName: reporterType === 'identified' ? reporterName : undefined,
-        reporterBadge: reporterType === 'identified' ? reporterBadge : undefined,
-        department,
-        category: category as ReportCategory,
-        location,
-        standNumber: location.startsWith('Apron Stand') ? location.replace('Apron ', '') : undefined,
-        flightNumber: flightNumber.trim() ? flightNumber.toUpperCase() : undefined,
-        aircraftReg: aircraftReg.trim() ? aircraftReg.toUpperCase() : undefined,
-        gseIdLinked: gseIdLinked || undefined,
-        description: description.trim(),
-        photoUrl: photoSimulated ? 'https://images.unsplash.com/photo-1540959733332-eab4deabeeaf?auto=format&fit=crop&w=600&q=80' : undefined,
-        preMitigationRisk: safetyFormConfig.enableRiskMatrix ? {
-          severity,
-          likelihood,
-          scoreCode: currentRisk.score,
-          level: currentRisk.level
-        } : undefined
-      });
+    const reportData = {
+      reportSource: 'frontline_agent' as const,
+      reporterType,
+      reporterName: reporterType === 'identified' ? reporterName : undefined,
+      reporterBadge: reporterType === 'identified' ? reporterBadge : undefined,
+      department,
+      category: category as ReportCategory,
+      location,
+      standNumber: location.startsWith('Apron Stand') ? location.replace('Apron ', '') : undefined,
+      flightNumber: flightNumber.trim() ? flightNumber.toUpperCase() : undefined,
+      aircraftReg: aircraftReg.trim() ? aircraftReg.toUpperCase() : undefined,
+      gseIdLinked: gseIdLinked || undefined,
+      description: description.trim(),
+      photoUrl: photoSimulated ? 'https://images.unsplash.com/photo-1540959733332-eab4deabeeaf?auto=format&fit=crop&w=600&q=80' : undefined,
+      preMitigationRisk: safetyFormConfig.enableRiskMatrix ? {
+        severity,
+        likelihood,
+        scoreCode: currentRisk.score,
+        level: currentRisk.level
+      } : undefined
+    };
 
+    setIsSubmitting(true);
+
+    // If device is offline (remote airport stand or network disconnected)
+    if (!effectiveOnline) {
+      try {
+        const saved = await saveOfflineReport(reportData);
+        await refreshOfflineQueue();
+        setIsSubmitting(false);
+        setSubmissionReceipt({
+          id: saved.id,
+          timestamp: saved.timestamp,
+          isOffline: true
+        });
+      } catch (err: any) {
+        setIsSubmitting(false);
+        setValidationError('Error storing offline report: ' + err.message);
+      }
+      return;
+    }
+
+    // If device is online: immediate Central submission
+    setTimeout(() => {
+      const newReport = addSafetyReport(reportData);
       setIsSubmitting(false);
-      setSubmissionReceipt({ id: newReport.id, timestamp: newReport.timestamp });
+      setSubmissionReceipt({ id: newReport.id, timestamp: newReport.timestamp, isOffline: false });
+      
+      // Auto-sync any lingering queued reports if present
+      if (queuedReports.length > 0) {
+        triggerAutoSync();
+      }
     }, 450);
   };
 
@@ -200,6 +321,89 @@ export const QuickSafetyReport: React.FC = () => {
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       
+      {/* Remote Airport Connectivity & Service Worker Offline Storage Bar */}
+      <div className={`p-3.5 rounded-2xl border text-xs flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-lg transition-all ${
+        effectiveOnline 
+          ? 'bg-slate-900/90 border-slate-800 text-slate-300' 
+          : 'bg-gradient-to-r from-amber-950/70 via-slate-900 to-slate-900 border-amber-500/40 text-amber-200'
+      }`}>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border tracking-wide uppercase shrink-0" style={{
+            backgroundColor: effectiveOnline ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.2)',
+            color: effectiveOnline ? '#34d399' : '#fbbf24',
+            borderColor: effectiveOnline ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.4)'
+          }}>
+            {effectiveOnline ? (
+              <>
+                <Wifi className="w-3.5 h-3.5" />
+                <span>Station Network Online</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3.5 h-3.5 animate-pulse" />
+                <span>Remote Stand Offline Mode</span>
+              </>
+            )}
+          </div>
+
+          <span className="text-[11px] text-slate-300">
+            {effectiveOnline 
+              ? 'Service Worker active. Safety reports submitted directly to Central SQMS.'
+              : 'Zero connectivity at apron stand. Reports save to device storage and sync automatically when back in range.'}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {/* Offline Queue Badge & Inspection */}
+          {queuedReports.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowOfflineQueueModal(true)}
+              className="px-2.5 py-1 rounded-lg bg-blue-900/40 hover:bg-blue-800/50 border border-blue-500/40 text-blue-300 font-mono text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>{queuedReports.length} Queued Offline</span>
+            </button>
+          )}
+
+          {/* Manual / Immediate Sync Trigger */}
+          {queuedReports.length > 0 && effectiveOnline && (
+            <button
+              type="button"
+              disabled={isSyncing}
+              onClick={triggerAutoSync}
+              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{isSyncing ? 'Syncing...' : 'Sync Queue Now'}</span>
+            </button>
+          )}
+
+          {/* Stand Offline Simulator Toggle (For testing remote airport conditions) */}
+          <button
+            type="button"
+            onClick={() => setSimulateOffline(!simulateOffline)}
+            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors flex items-center gap-1 cursor-pointer ${
+              simulateOffline
+                ? 'bg-amber-600/30 border-amber-500 text-amber-200 hover:bg-amber-600/40'
+                : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400 hover:text-white'
+            }`}
+            title="Toggle to simulate remote airport apron with zero cellular connectivity"
+          >
+            {simulateOffline ? <WifiOff className="w-3 h-3 text-amber-400" /> : <Wifi className="w-3 h-3" />}
+            <span>{simulateOffline ? 'End Offline Sim' : 'Simulate Stand Offline'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Sync Feedback Toast Banner */}
+      {syncFeedback && (
+        <div className="p-3 bg-emerald-950/70 border border-emerald-500/50 rounded-xl text-xs text-emerald-200 flex items-center gap-2 animate-in fade-in slide-in-from-top-1 shadow-lg">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="font-medium">{syncFeedback}</span>
+        </div>
+      )}
+
       {/* Admin Quick Action Banner: if current role has permission to configure form */}
       {canConfigureForm && (
         <div className="p-3 bg-gradient-to-r from-amber-950/60 to-slate-900 border border-amber-500/40 rounded-xl flex items-center justify-between text-xs text-amber-200">
@@ -231,6 +435,11 @@ export const QuickSafetyReport: React.FC = () => {
               <span className="text-[11px] text-blue-300 font-medium">
                 {t.quickReport.badgeJustCulture}
               </span>
+              {!effectiveOnline && (
+                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-mono font-bold">
+                  OFFLINE ACTIVE
+                </span>
+              )}
             </div>
             <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
               {t.quickReport.title}
@@ -263,32 +472,50 @@ export const QuickSafetyReport: React.FC = () => {
         </div>
       </div>
 
-      {/* Confirmation Success Receipt Screen */}
+      {/* Confirmation Success Receipt Screen (Online or Offline Queued) */}
       {submissionReceipt ? (
-        <div className="bg-slate-900 border border-emerald-500/50 rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-2xl animate-in zoom-in-95 duration-200">
-          <div className="w-16 h-16 rounded-full bg-emerald-500/20 border-2 border-emerald-500 flex items-center justify-center text-emerald-400 mx-auto">
-            <CheckCircle2 className="w-8 h-8" />
+        <div className={`bg-slate-900 border rounded-2xl p-6 sm:p-8 text-center space-y-5 shadow-2xl animate-in zoom-in-95 duration-200 ${
+          submissionReceipt.isOffline ? 'border-amber-500/50' : 'border-emerald-500/50'
+        }`}>
+          <div className={`w-16 h-16 rounded-full border-2 flex items-center justify-center mx-auto ${
+            submissionReceipt.isOffline 
+              ? 'bg-amber-500/20 border-amber-500 text-amber-400' 
+              : 'bg-emerald-500/20 border-emerald-500 text-emerald-400'
+          }`}>
+            {submissionReceipt.isOffline ? <Database className="w-8 h-8 animate-pulse" /> : <CheckCircle2 className="w-8 h-8" />}
           </div>
 
           <div className="space-y-1">
             <h2 className="text-xl font-black text-white">
-              {t.quickReport.successTitle}
+              {submissionReceipt.isOffline 
+                ? (language === 'ar' ? 'تم حفظ البلاغ محلياً (وضع عدم الاتصال بالمهبط)' : 'Report Secured in Offline Storage (Service Worker)')
+                : t.quickReport.successTitle}
             </h2>
-            <p className="text-xs text-slate-300 max-w-md mx-auto">
-              {t.quickReport.successMessage}
+            <p className="text-xs text-slate-300 max-w-md mx-auto leading-relaxed">
+              {submissionReceipt.isOffline
+                ? (language === 'ar'
+                    ? 'أنت تعمل حالياً بموقف طائرات ناءٍ دون تغطية شبكة. تم تأمين وتخزين البلاغ محلياً وسيقوم النظام بمزامنته تلقائياً مع قاعدة بيانات السلامة المركزية فور استعادة الاتصال.'
+                    : 'You are submitting from a remote airport location with no network signal. Your safety report has been stored securely in local browser storage via Service Worker and will automatically synchronize to Central Safety SQMS when connectivity returns.')
+                : t.quickReport.successMessage}
             </p>
           </div>
 
           {/* Reference Box */}
           <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 max-w-sm mx-auto space-y-2">
             <span className="text-[11px] text-slate-400 uppercase tracking-wider block">
-              {t.quickReport.trackingCode}
+              {submissionReceipt.isOffline ? 'Offline Queue Ticket ID' : t.quickReport.trackingCode}
             </span>
-            <div className="font-mono text-2xl font-bold text-blue-400 tracking-wider">
+            <div className={`font-mono text-2xl font-bold tracking-wider ${
+              submissionReceipt.isOffline ? 'text-amber-400' : 'text-blue-400'
+            }`}>
               {submissionReceipt.id}
             </div>
-            <div className="text-[11px] text-slate-500">
-              Logged at {submissionReceipt.timestamp} · RMF Queue
+            <div className="text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
+              <span>Logged at {submissionReceipt.timestamp}</span>
+              <span>·</span>
+              <span className={submissionReceipt.isOffline ? 'text-amber-400 font-semibold' : 'text-emerald-400 font-semibold'}>
+                {submissionReceipt.isOffline ? 'Queued for Auto-Sync' : 'Committed to Central SQMS'}
+              </span>
             </div>
           </div>
 
@@ -296,7 +523,7 @@ export const QuickSafetyReport: React.FC = () => {
           <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
             <button
               onClick={handleCopyCode}
-              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors"
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               <span>{copiedCode ? t.quickReport.copied : t.quickReport.copyCode}</span>
@@ -304,7 +531,7 @@ export const QuickSafetyReport: React.FC = () => {
 
             <button
               onClick={() => window.print()}
-              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors"
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>{t.quickReport.printReceipt}</span>
@@ -317,7 +544,7 @@ export const QuickSafetyReport: React.FC = () => {
                 setPhotoSimulated(false);
                 setValidationError(null);
               }}
-              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white flex items-center gap-1.5 shadow-md shadow-blue-600/30 transition-colors"
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white flex items-center gap-1.5 shadow-md shadow-blue-600/30 transition-colors cursor-pointer"
             >
               <span>{t.quickReport.submitAnother}</span>
             </button>
@@ -325,7 +552,7 @@ export const QuickSafetyReport: React.FC = () => {
             {isViewPermitted('incidentLogs', activeRole) && (
               <button
                 onClick={() => setActiveView('incidentLogs')}
-                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors"
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <span>{t.quickReport.viewInLog}</span>
                 <ArrowRight className="w-3.5 h-3.5 rtl:rotate-180" />
@@ -644,13 +871,105 @@ export const QuickSafetyReport: React.FC = () => {
           <button
             type="submit"
             disabled={isSubmitting || !description.trim()}
-            className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-500 disabled:bg-slate-800 text-white font-bold text-sm shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer disabled:cursor-not-allowed"
+            className={`w-full py-3 rounded-xl font-bold text-sm shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer disabled:cursor-not-allowed ${
+              effectiveOnline
+                ? 'bg-red-600 hover:bg-red-500 disabled:bg-slate-800 text-white shadow-red-600/30'
+                : 'bg-amber-600 hover:bg-amber-500 disabled:bg-slate-800 text-white shadow-amber-600/30'
+            }`}
           >
-            <ShieldAlert className="w-4 h-4" />
-            <span>{isSubmitting ? t.quickReport.submitting : t.quickReport.submitButton}</span>
+            {effectiveOnline ? <ShieldAlert className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+            <span>
+              {isSubmitting 
+                ? (effectiveOnline ? t.quickReport.submitting : 'Storing in Offline Storage...') 
+                : (effectiveOnline ? t.quickReport.submitButton : 'Save Report to Offline Queue (Remote Stand)')}
+            </span>
           </button>
 
         </form>
+      )}
+
+      {/* Offline Reports Inspection Modal */}
+      {showOfflineQueueModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl text-slate-100 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 text-blue-400" />
+                <h3 className="text-base font-bold text-white">
+                  Local Offline Reports Queue ({queuedReports.length})
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowOfflineQueueModal(false)}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              These reports were captured at remote airport locations while offline. They are safely secured in your browser's IndexedDB / Service Worker storage and will automatically synchronize once connectivity is restored.
+            </p>
+
+            <div className="space-y-2.5">
+              {queuedReports.length === 0 ? (
+                <div className="text-center py-6 text-slate-500 text-xs">
+                  No reports currently queued offline.
+                </div>
+              ) : (
+                queuedReports.map((q) => (
+                  <div key={q.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-bold text-amber-400">{q.id}</span>
+                      <span className="text-[10px] text-slate-500 font-mono">{q.timestamp}</span>
+                    </div>
+                    <div className="text-slate-300 font-medium line-clamp-2">
+                      {q.data.description}
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-900 text-[11px] text-slate-400">
+                      <span>Location: <strong>{q.data.location}</strong></span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await removeOfflineReport(q.id);
+                          await refreshOfflineQueue();
+                        }}
+                        className="text-red-400 hover:text-red-300 text-[11px] flex items-center gap-1 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Discard</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowOfflineQueueModal(false)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-semibold cursor-pointer"
+              >
+                Close
+              </button>
+              {queuedReports.length > 0 && effectiveOnline && (
+                <button
+                  type="button"
+                  disabled={isSyncing}
+                  onClick={async () => {
+                    await triggerAutoSync();
+                    setShowOfflineQueueModal(false);
+                  }}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>Sync All to Central SQMS</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

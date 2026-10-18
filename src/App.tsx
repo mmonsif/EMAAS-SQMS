@@ -11,6 +11,7 @@ import { QuickSafetyReport } from './components/QuickSafetyReport.tsx';
 import { SafetyReportsView } from './components/SafetyReportsView.tsx';
 import { AuditsModule } from './components/AuditsModule.tsx';
 import { SPIManager } from './components/SPIManager.tsx';
+import { SafetyKPIDashboardView } from './components/SafetyKPIDashboardView.tsx';
 import { SafetyBulletinsView } from './components/SafetyBulletinsView.tsx';
 import { ManagementOfChangeView } from './components/ManagementOfChangeView.tsx';
 import { GSEFleetView } from './components/GSEFleetView.tsx';
@@ -32,6 +33,8 @@ const AppContent: React.FC = () => {
     switch (activeView) {
       case 'quickReport':
         return <QuickSafetyReport />;
+      case 'kpiDashboard':
+        return <SafetyKPIDashboardView />;
       case 'incidentLogs':
         return <SafetyReportsView />;
       case 'audits':

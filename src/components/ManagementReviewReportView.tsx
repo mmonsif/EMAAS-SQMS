@@ -230,7 +230,7 @@ export const ManagementReviewReportView: React.FC = () => {
               <p>
                 {reportLang === 'ar'
                   ? "تلتزم إدارة الخدمات الأرضية بمطار مرسى علم الدولي بتقديم أعلى معايير السلامة والجودة لجميع شركات الطيران المشغلة وركابها. نؤكد التزامنا التام بمبادئ ثقافة العدالة (Just Culture)، وتوفير الموارد الكافية لصيانة أسطول المعدات، وتدريب الكوادر الميدانية وفقاً لأحدث معايير IATA ISAGO و IGOM."
-                  : "Marsa Alam Ground Handling Services (MAGS) leadership is unequivocally dedicated to operating with zero harm across all apron turnarounds. Under our Just Culture mandate, personnel are empowered to halt operations immediately upon observing any unmitigated hazard without fear of reprisal."}
+                  : "EMAAS Ground Handling Services leadership is unequivocally dedicated to operating with zero harm across all apron turnarounds. Under our Just Culture mandate, personnel are empowered to halt operations immediately upon observing any unmitigated hazard without fear of reprisal."}
               </p>
               <div className="pt-2 font-bold text-slate-900">
                 Gen. Adel Radwan — Accountable Executive (AE)
@@ -325,7 +325,7 @@ export const ManagementReviewReportView: React.FC = () => {
                     <td className="p-2 border border-slate-200 font-semibold">{f.standardReference}</td>
                     <td className="p-2 border border-slate-200">{f.severityLevel}</td>
                     <td className="p-2 border border-slate-200">{f.assignedDepartment}</td>
-                    <td className="p-2 border border-slate-200 font-mono capitalize">{f.lifecycleStage.replace('_', ' ')}</td>
+                    <td className="p-2 border border-slate-200 font-mono capitalize">{(f.lifecycleStage || f.lifecycleStatus || 'submitted').replace(/_/g, ' ')}</td>
                   </tr>
                 ))}
               </tbody>
